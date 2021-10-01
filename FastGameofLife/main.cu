@@ -14,6 +14,7 @@ inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=t
    }
 }
 
+#define get(A, x, y, pitch, N) ((x) >= 0 && (x) < N && (y) >= 0 && (y) < N) ? A[(x)*pitch + (y)] : 0
 __global__ void game_of_life_iter(char* A, char* B, size_t pitcha, size_t pitchb, int N){
     int localx = threadIdx.x;
     int localy = threadIdx.y;
@@ -21,19 +22,71 @@ __global__ void game_of_life_iter(char* A, char* B, size_t pitcha, size_t pitchb
     int globaly = localy + blockIdx.y * MULSIDE;
  
     char alive = 0;
-    char self = A[globalx * pitcha + globaly];
-    alive += (globalx > 0 && globaly > 0) ? A[(globalx-1) * pitcha + (globaly-1)] : 0;
-    alive += (globalx > 0) ? A[(globalx-1) * pitcha + globaly] : 0;
-    alive += (globalx > 0 && globaly < N-1) ? A[(globalx-1) * pitcha + (globaly+1)] : 0;
+    char self = get(A, globalx, globaly, pitcha, N);
+    alive += get(A, globalx-1, globaly-1, pitcha, N);
+    alive += get(A, globalx-1, globaly, pitcha, N);
+    alive += get(A, globalx-1, globaly+1, pitcha, N);
 
-    alive += (globaly > 0) ? A[globalx * pitcha + (globaly-1)] : 0;
-    alive += (globaly < N-1) ? A[globalx * pitcha + (globaly+1)] : 0;
+    alive += get(A, globalx, globaly-1, pitcha, N);
+    alive += get(A, globalx, globaly+1, pitcha, N);
 
-
-    alive += (globalx < N-1 && globaly > 0) ? A[(globalx+1) * pitcha + (globaly-1)] : 0;
-    alive += (globalx < N-1) ? A[(globalx+1) * pitcha + globaly] : 0;
-    alive += (globalx < N-1 && globaly < N-1) ? A[(globalx+1) * pitcha + (globaly+1)] : 0;
+    alive += get(A, globalx+1, globaly-1, pitcha, N);
+    alive += get(A, globalx+1, globaly, pitcha, N);
+    alive += get(A, globalx+1, globaly+1, pitcha, N);
     
+    if (self && (alive < 2 || alive > 3)){
+        B[globalx * pitchb + globaly] = 0;
+    }
+    else if (!self && alive == 3){
+        B[globalx * pitchb + globaly] = 1;
+    }
+    else{
+        B[globalx * pitchb + globaly] = self;
+    }
+}
+
+
+__global__ void faster_game_of_life_iter(char* A, char* B, size_t pitcha, size_t pitchb, int N){
+    __shared__ char source[MULSIDE+2][MULSIDE+2];
+
+    int localx = threadIdx.x;
+    int localy = threadIdx.y;
+    int globalx = localx + blockIdx.x * MULSIDE;
+    int globaly = localy + blockIdx.y * MULSIDE;
+
+    // index used to address the 'source' array.
+    int src_x = localx + 1;
+    int src_y = localy + 1;
+    source[src_x][src_y] = get(A, globalx, globaly, pitcha, N);
+
+    // sides
+    if (localx == 0)
+        source[src_x-1][src_y] = get(A, globalx-1, globaly, pitcha, N);
+    if (localx == MULSIDE-1)
+        source[src_x+1][src_y] = get(A, globalx+1, globaly, pitcha, N);
+    if (localy == 0)
+        source[src_x][src_y-1] = get(A, globalx, globaly-1, pitcha, N);
+    if (localy == MULSIDE-1)
+        source[src_x][src_y+1] = get(A, globalx, globaly+1, pitcha, N);
+
+    // corners
+    if (localx == 0 && localy == 0)
+        source[src_x-1][src_y-1] = get(A, globalx-1, globaly-1, pitcha, N);
+    if (localx == MULSIDE-1 && localy == 0)
+        source[src_x+1][src_y-1] = get(A, globalx+1, globaly-1, pitcha, N);
+    if (localx == 0 && localy == MULSIDE-1)
+        source[src_x-1][src_y+1] = get(A, globalx-1, globaly+1, pitcha, N);
+    if (localx == MULSIDE-1 && localy == MULSIDE-1)
+        source[src_x+1][src_y+1] = get(A, globalx+1, globaly+1, pitcha, N);
+    __syncthreads();
+ 
+    // count alive neighbors
+    // unroll to speed up
+    char self = source[src_x][src_y];
+    char alive = source[src_x-1][src_y-1] + source[src_x-1][src_y] + source[src_x-1][src_y+1]
+    + source[src_x][src_y-1] + source[src_x][src_y+1]
+    + source[src_x+1][src_y-1] + source[src_x+1][src_y] + source[src_x+1][src_y+1];
+
     if (self && (alive < 2 || alive > 3)){
         B[globalx * pitchb + globaly] = 0;
     }
@@ -90,7 +143,7 @@ int main(int argc, char** argv)
     for (int i = 0; i < M; i++){
         int x = i%2;
         int BLOCKS = divCeil(N, MULSIDE);
-        game_of_life_iter <<< dim3(BLOCKS,BLOCKS), dim3(MULSIDE,MULSIDE) >>> (devA[x], devA[!x], pitch[x], pitch[!x], N);
+        faster_game_of_life_iter <<< dim3(BLOCKS,BLOCKS), dim3(MULSIDE,MULSIDE) >>> (devA[x], devA[!x], pitch[x], pitch[!x], N);
         gpuErrchk(cudaPeekAtLastError());
         gpuErrchk(cudaDeviceSynchronize());
     }
